@@ -25,7 +25,7 @@ import (
 const (
 	// the channels used for internal use and callers are all buffered.
 	// We don't want the producers to be blocked.
-	_Chansize          int = 4096
+	_Chansize int = 4096
 
 	// we use one worker per CPU core for the concurrent walker.
 	// ParallelismFactor multiples the number of go-routines.
@@ -88,7 +88,6 @@ type duState struct {
 	// Tracks device major:minor to detect mount-point crossings
 	fs sync.Map
 }
-
 
 // Walk traverses the entries in 'names' in a concurrent fashion and returns
 // results in a channel of Result. The caller must service the channel. Any errors
@@ -167,12 +166,7 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 
 	// queue the dirs
 	if len(dirs) > 0 {
-		d.wg.Add(len(dirs))
-		go func() {
-			for i := range dirs {
-				d.ch <- dirs[i]
-			}
-		}()
+		d.enq(dirs)
 	}
 
 	// close the channels when we're all done
@@ -211,17 +205,22 @@ func (d *duState) worker() {
 		}
 
 		if len(dirs) > 0 {
-			// requeue the dirs
-			d.wg.Add(len(dirs))
-			go func() {
-				for i := range dirs {
-					d.ch <- dirs[i]
-				}
-			}()
+			d.enq(dirs)
 		}
 
 		d.wg.Done()
 	}
+}
+
+// enqueue a list of dirs in a separate go-routine so the caller is
+// not blocked (deadlocked)
+func (d *duState) enq(dirs []string) {
+	d.wg.Add(len(dirs))
+	go func() {
+		for i := range dirs {
+			d.ch <- dirs[i]
+		}
+	}()
 }
 
 // process a directory and return the list of subdirs and a total of all regular
