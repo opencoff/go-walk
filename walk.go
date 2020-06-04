@@ -71,7 +71,7 @@ type Result struct {
 }
 
 // internal state
-type duState struct {
+type walkState struct {
 	Options
 	typ   Type
 	ch    chan string
@@ -98,10 +98,7 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 		opt = &Options{}
 	}
 
-	// number of workers
-	nworkers := runtime.NumCPU() * _ParallelismFactor
-
-	d := &duState{
+	d := &walkState{
 		Options: *opt,
 		typ:     typ,
 		ch:      make(chan string, _Chansize),
@@ -116,8 +113,9 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 		d.singlefs = d.isSingleFS
 	}
 
-	// start workers
-	// They will end when the channel is closed; we don't need any waitgroups
+	// start workers; they will end when the channel is closed; we don't need
+	// any waitgroups to track these goroutines.
+	nworkers := runtime.NumCPU() * _ParallelismFactor
 	for i := 0; i < nworkers; i++ {
 		go d.worker()
 	}
@@ -181,7 +179,7 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 }
 
 // worker thread to walk directories
-func (d *duState) worker() {
+func (d *walkState) worker() {
 	for nm := range d.ch {
 
 		fi, err := os.Lstat(nm)
@@ -214,7 +212,7 @@ func (d *duState) worker() {
 
 // enqueue a list of dirs in a separate go-routine so the caller is
 // not blocked (deadlocked)
-func (d *duState) enq(dirs []string) {
+func (d *walkState) enq(dirs []string) {
 	d.wg.Add(len(dirs))
 	go func() {
 		for i := range dirs {
@@ -225,7 +223,7 @@ func (d *duState) enq(dirs []string) {
 
 // process a directory and return the list of subdirs and a total of all regular
 // file sizes
-func (d *duState) walkPath(nm string) (dirs []string, err error) {
+func (d *walkState) walkPath(nm string) (dirs []string, err error) {
 	fd, err := os.Open(nm)
 	if err != nil {
 		return nil, err
@@ -276,9 +274,9 @@ func (d *duState) walkPath(nm string) (dirs []string, err error) {
 	return dirs, nil
 }
 
-// Walk symlinks - we restrict the number of symlinks we will follow to avoid
-// infinite loops
-func (d *duState) doSymlink(nm string, fi os.FileInfo) bool {
+// Walk symlinks - we let the kernel follow the symlinks and resolve any loops.
+// This function returns true if 'nm' ends up being a directory that we must descend.
+func (d *walkState) doSymlink(nm string, fi os.FileInfo) bool {
 
 	if !d.FollowSymlinks {
 		d.out <- Result{nm, fi}
@@ -318,14 +316,14 @@ func (d *duState) doSymlink(nm string, fi os.FileInfo) bool {
 }
 
 // track this file for future mount points
-func (d *duState) trackFS(fi os.FileInfo, nm string) {
+func (d *walkState) trackFS(fi os.FileInfo, nm string) {
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		d.fs.Store(st.Dev, nm)
 	}
 }
 
 // Return true if the inode is on the same file system as the command line args
-func (d *duState) isSingleFS(fi os.FileInfo, nm string) bool {
+func (d *walkState) isSingleFS(fi os.FileInfo, nm string) bool {
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		if _, ok := d.fs.Load(st.Dev); ok {
 			return true
