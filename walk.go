@@ -127,10 +127,13 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 		var err error
 
 		nm := strings.TrimSuffix(names[i], "/")
+		if len(nm) == 0 {
+			nm = "/"
+		}
 
 		fi, err = os.Lstat(nm)
 		if err != nil {
-			d.errch <- err
+			d.errch <- fmt.Errorf("lstat %s: %w", nm, err)
 			continue
 		}
 
@@ -184,7 +187,7 @@ func (d *walkState) worker() {
 
 		fi, err := os.Lstat(nm)
 		if err != nil {
-			d.errch <- err
+			d.errch <- fmt.Errorf("lstat %s: %w", nm, err)
 			d.wg.Done()
 			continue
 		}
@@ -233,6 +236,11 @@ func (d *walkState) walkPath(nm string) (dirs []string, err error) {
 	fiv, err := fd.Readdir(-1)
 	if err != nil {
 		return nil, err
+	}
+
+	// hack to make joined paths not look like '//file'
+	if nm == "/" {
+		nm = ""
 	}
 
 	dirs = make([]string, 0, len(fiv)/2)
