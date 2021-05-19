@@ -39,6 +39,9 @@ type Options struct {
 
 	// stay within the same file-system
 	OneFS bool
+
+	// Exclude names starting with this list
+	Excludes []string
 }
 
 // Type denotes the walk type - it is a way to filter the results returned by
@@ -131,6 +134,10 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 			nm = "/"
 		}
 
+		if d.exclude(nm) {
+			continue
+		}
+
 		fi, err = os.Lstat(nm)
 		if err != nil {
 			d.errch <- fmt.Errorf("lstat %s: %w", nm, err)
@@ -211,6 +218,17 @@ func (d *walkState) worker() {
 
 		d.wg.Done()
 	}
+}
+
+// return true if nm needs to be excluded
+func (d *walkState) exclude(nm string) bool {
+	for _, v := range d.Excludes {
+		if strings.HasPrefix(nm, v) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // enqueue a list of dirs in a separate go-routine so the caller is
