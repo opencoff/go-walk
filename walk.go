@@ -173,16 +173,14 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 	}
 
 	// queue the dirs
-	if len(dirs) > 0 {
-		d.enq(dirs)
-	}
+	d.enq(dirs)
 
 	// close the channels when we're all done
 	go func() {
 		d.wg.Wait()
+		close(d.ch)
 		close(d.out)
 		close(d.errch)
-		close(d.ch)
 	}()
 
 	return d.out, d.errch
@@ -191,7 +189,6 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 // worker thread to walk directories
 func (d *walkState) worker() {
 	for nm := range d.ch {
-
 		fi, err := os.Lstat(nm)
 		if err != nil {
 			d.errch <- fmt.Errorf("lstat %s: %w", nm, err)
@@ -205,17 +202,14 @@ func (d *walkState) worker() {
 			d.out <- Result{nm, fi}
 		}
 
-		dirs, err := d.walkPath(nm)
+		err = d.walkPath(nm)
 		if err != nil {
 			d.errch <- err
-			d.wg.Done()
-			continue
 		}
 
-		if len(dirs) > 0 {
-			d.enq(dirs)
-		}
-
+		// It is crucial that we do this as the last thing in the processing loop.
+		// Otherwise, we have a race condition where the workers will prematurely quit.
+		// We can only decrement this wait-group _after_ walkPath() has returned!
 		d.wg.Done()
 	}
 }
@@ -234,26 +228,35 @@ func (d *walkState) exclude(nm string) bool {
 // enqueue a list of dirs in a separate go-routine so the caller is
 // not blocked (deadlocked)
 func (d *walkState) enq(dirs []string) {
-	d.wg.Add(len(dirs))
-	go func() {
-		for i := range dirs {
-			d.ch <- dirs[i]
-		}
-	}()
+	if len(dirs) > 0 {
+		d.wg.Add(len(dirs))
+		go func() {
+			for _, nm := range dirs {
+				d.ch <- nm
+			}
+		}()
+	}
 }
 
 // process a directory and return the list of subdirs and a total of all regular
-// file sizes
-func (d *walkState) walkPath(nm string) (dirs []string, err error) {
+// file sizes.
+//
+// There is *no* race condition between the workers harvesting d.ch and the
+// wait-group going to zero: there is at least 1 count outstanding: of the
+// current entry being processed. So, this function can take as long as it wants
+// the caller (d.worker()) won't decrement that wait-count until this function
+// returns. And by then the wait-count would've been bumped up by the number of
+// dirs we've seen here.
+func (d *walkState) walkPath(nm string) (err error) {
 	fd, err := os.Open(nm)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer fd.Close()
 
 	fiv, err := fd.Readdir(-1)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// hack to make joined paths not look like '//file'
@@ -261,7 +264,7 @@ func (d *walkState) walkPath(nm string) (dirs []string, err error) {
 		nm = ""
 	}
 
-	dirs = make([]string, 0, len(fiv)/2)
+	dirs := make([]string, 0, len(fiv)/2)
 	for i := range fiv {
 		fi := fiv[i]
 		m := fi.Mode()
@@ -272,11 +275,10 @@ func (d *walkState) walkPath(nm string) (dirs []string, err error) {
 
 		switch {
 		case m.IsDir():
-			// we only have to worry about mount points
-			if !d.singlefs(fi, fp) {
-				continue
+			// don't descend if this directory is not on the same file system.
+			if d.singlefs(fi, fp) {
+				dirs = append(dirs, fp)
 			}
-			dirs = append(dirs, fp)
 
 		case m.IsRegular():
 			if (d.typ & FILE) > 0 {
@@ -297,7 +299,8 @@ func (d *walkState) walkPath(nm string) (dirs []string, err error) {
 		}
 	}
 
-	return dirs, nil
+	d.enq(dirs)
+	return nil
 }
 
 // Walk symlinks - we let the kernel follow the symlinks and resolve any loops.
