@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"path"
 )
 
 const (
@@ -42,6 +43,10 @@ type Options struct {
 
 	// Exclude names starting with this list
 	Excludes []string
+
+	// Optional caller provided filter; results are FILTERED OUT
+	// of the output chan iff this function returns true.
+	Filter	func(nm string, fi os.FileInfo) bool
 }
 
 // Type denotes the walk type - it is a way to filter the results returned by
@@ -86,10 +91,11 @@ type walkState struct {
 	// we've encountered.
 	wg sync.WaitGroup
 
-	singlefs func(fi os.FileInfo, nm string) bool
+	singlefs func(nm string, fi os.FileInfo) bool
 
 	// Tracks device major:minor to detect mount-point crossings
 	fs sync.Map
+	ino sync.Map
 }
 
 // Walk traverses the entries in 'names' in a concurrent fashion and returns
@@ -101,19 +107,27 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 		opt = &Options{}
 	}
 
+
 	d := &walkState{
 		Options: *opt,
 		typ:     typ,
 		ch:      make(chan string, _Chansize),
 		out:     make(chan Result, _Chansize),
 		errch:   make(chan error, 8),
-		singlefs: func(os.FileInfo, string) bool {
+		singlefs: func(string, os.FileInfo) bool {
 			return true
 		},
 	}
 
 	if opt.OneFS {
 		d.singlefs = d.isSingleFS
+	}
+
+	// default accept filter
+	if d.Filter == nil {
+		d.Filter = func(_ string, _ os.FileInfo) bool {
+			return false
+		}
 	}
 
 	// start workers; they will end when the channel is closed; we don't need
@@ -155,19 +169,17 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 
 		case m.IsRegular():
 			if (d.typ & FILE) > 0 {
-				d.out <- Result{nm, fi}
+				d.output(nm, fi)
 			}
 
 		case (m & os.ModeSymlink) > 0:
 			// we may have new info now. The symlink may point to file, dir or
 			// special.
-			if d.doSymlink(nm, fi) {
-				dirs = append(dirs, nm)
-			}
+			dirs = d.doSymlink(nm, fi, dirs)
 
 		default:
 			if (d.typ & SPECIAL) > 0 {
-				d.out <- Result{nm, fi}
+				d.output(nm, fi)
 			}
 		}
 	}
@@ -186,6 +198,13 @@ func Walk(names []string, typ Type, opt *Options) (chan Result, chan error) {
 	return d.out, d.errch
 }
 
+// Queue output to chan if user defined filter says accept
+func (d *walkState) output(nm string, fi os.FileInfo) {
+	if !d.Filter(nm, fi) {
+		d.out <- Result{nm, fi}
+	}
+}
+
 // worker thread to walk directories
 func (d *walkState) worker() {
 	for nm := range d.ch {
@@ -199,7 +218,7 @@ func (d *walkState) worker() {
 		// we are _sure_ this is a dir.
 
 		if (d.typ & DIR) > 0 {
-			d.out <- Result{nm, fi}
+			d.output(nm, fi)
 		}
 
 		err = d.walkPath(nm)
@@ -276,25 +295,23 @@ func (d *walkState) walkPath(nm string) (err error) {
 		switch {
 		case m.IsDir():
 			// don't descend if this directory is not on the same file system.
-			if d.singlefs(fi, fp) {
+			if d.singlefs(fp, fi) {
 				dirs = append(dirs, fp)
 			}
 
 		case m.IsRegular():
 			if (d.typ & FILE) > 0 {
-				d.out <- Result{fp, fi}
+				d.output(fp, fi)
 			}
 
 		case (m & os.ModeSymlink) > 0:
 			// we may have new info now. The symlink may point to file, dir or
 			// special.
-			if d.doSymlink(fp, fi) {
-				dirs = append(dirs, fp)
-			}
+			dirs = d.doSymlink(fp, fi, dirs)
 
 		default:
 			if (d.typ & SPECIAL) > 0 {
-				d.out <- Result{fp, fi}
+				d.output(fp, fi)
 			}
 		}
 	}
@@ -305,42 +322,96 @@ func (d *walkState) walkPath(nm string) (err error) {
 
 // Walk symlinks - we let the kernel follow the symlinks and resolve any loops.
 // This function returns true if 'nm' ends up being a directory that we must descend.
-func (d *walkState) doSymlink(nm string, fi os.FileInfo) bool {
-
+func (d *walkState) doSymlink(nm string, fi os.FileInfo, dirs []string) []string {
 	if !d.FollowSymlinks {
-		d.out <- Result{nm, fi}
-		return false
+		d.output(nm, fi)
+		return dirs
 	}
 
-	fi, err := os.Stat(nm)
-	if err != nil {
-		d.errch <- err
-		return false
+	// process symlinks until we are done
+	done := false
+	for !done {
+		ln, err := os.Readlink(nm)
+		if err != nil {
+			d.errch <- fmt.Errorf("readlink %s: %s", nm, err)
+			return dirs
+		}
+
+		// update the name with link name
+		// We don't use path.Join() because it strips leading './'
+		dn := path.Dir(nm)
+
+		fmt.Printf("# clean symlink: %s -> %s\n", nm, path.Clean(fmt.Sprintf("%s/%s", dn, ln)))
+
+		nm = path.Clean(fmt.Sprintf("%s/%s", dn, ln))
+
+
+		fi, err := os.Lstat(nm)
+		if err != nil {
+			d.errch <- err
+			return dirs
+		}
+
+		fmt.Printf("# symlink %s -> %s/%s\n", nm, dn, ln)
+
+		m := fi.Mode()
+		if (m & os.ModeSymlink) > 0 {
+			// This is another symlink - so unravel
+			continue
+		}
+
+		// in all other cases, we've reached a non-symlink
+		done = true
+		switch {
+		case m.IsDir():
+			// we only have to worry about mount points
+			if d.trackInode(fi) {
+				fmt.Printf("# dup dir inode %s -> %s/%s\n", nm, dn, ln)
+				return dirs
+			}
+
+			if d.singlefs(nm, fi) {
+				// We need to descend the link pointed to by this file;
+				dirs = append(dirs, nm)
+			}
+
+		case m.IsRegular():
+			if d.trackInode(fi) {
+				fmt.Printf("# dup file inode %s -> %s/%s\n", nm, dn, ln)
+				return dirs
+			}
+			if (d.typ & FILE) > 0 {
+				d.output(nm, fi)
+			}
+
+		default:
+			if d.trackInode(fi) {
+				fmt.Printf("# dup spl inode %s -> %s/%s\n", nm, dn, ln)
+				return dirs
+			}
+			if (d.typ & SPECIAL) > 0 {
+				d.output(nm, fi)
+			}
+		}
 	}
 
-	m := fi.Mode()
-	switch {
-	case m.IsDir():
-		// we only have to worry about mount points
-		if d.singlefs(fi, nm) {
-			return true
-		}
+	return dirs
+}
 
-	case m.IsRegular():
-		if (d.typ & FILE) > 0 {
-			d.out <- Result{nm, fi}
-		}
-
-	case (m & os.ModeSymlink) > 0:
-		// This should never happen since the kernel was walked the symlink chain
-		panic(fmt.Sprintf("walk: symlink %s yielded another symlink!", nm))
-
-	default:
-		if (d.typ & SPECIAL) > 0 {
-			d.out <- Result{nm, fi}
+// track this inode to detect loops; return true if we've seen it before
+// false otherwise.
+func (d *walkState) trackInode(fi os.FileInfo) bool {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		key := fmt.Sprintf("%d:%d:%d", st.Dev, st.Rdev, st.Ino)
+		if x, ok := d.ino.LoadOrStore(key, fi); ok {
+			xt := x.(*syscall.Stat_t)
+			fmt.Printf("# old ino: %d:%d:%d  <-> new ino: %d:%d:%d\n",
+				xt.Dev, xt.Rdev, xt.Ino, st.Dev, st.Rdev, st.Ino)
+			if xt.Dev == st.Dev && xt.Rdev == st.Rdev && xt.Ino == st.Ino {
+				return true
+			}
 		}
 	}
-
 	return false
 }
 
@@ -352,7 +423,7 @@ func (d *walkState) trackFS(fi os.FileInfo, nm string) {
 }
 
 // Return true if the inode is on the same file system as the command line args
-func (d *walkState) isSingleFS(fi os.FileInfo, nm string) bool {
+func (d *walkState) isSingleFS(nm string, fi os.FileInfo) bool {
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		if _, ok := d.fs.Load(st.Dev); ok {
 			return true
