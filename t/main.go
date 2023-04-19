@@ -24,14 +24,10 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
-	"sync"
-
 
 	"github.com/opencoff/go-walk"
 	flag "github.com/opencoff/pflag"
 )
-
 
 func main() {
 
@@ -57,35 +53,20 @@ func main() {
 		os.Exit(1)
 	}
 
-
 	wo := walk.Options{
 		FollowSymlinks: follow,
-		OneFS: oneFS,
-		Type:  walk.FILE|walk.SYMLINK|walk.SPECIAL,
-		Excludes: excl,
+		OneFS:          oneFS,
+		Type:           walk.FILE | walk.SYMLINK | walk.SPECIAL,
+		Excludes:       excl,
 	}
 
-	var wg sync.WaitGroup
-	var s strings.Builder
+	errs := walk.WalkFunc(args, &wo, func(nm string, _ os.FileInfo) error {
+		fmt.Printf("%s\n", nm)
+		return nil
+	})
 
-	och, ech := walk.Walk(args, &wo)
-
-	wg.Add(1)
-	go func(ch chan error) {
-		for err := range ch {
-			s.WriteString(fmt.Sprintf("%s\n", err))
-		}
-		wg.Done()
-	}(ech)
-
-	for r := range och {
-		fmt.Printf("%s\n", r.Path)
+	for i := range errs {
+		fmt.Fprintf(os.Stderr, "%s\n", errs[i])
 	}
-
-	wg.Wait()
-	fmt.Fprintf(os.Stderr, "%s\n", s.String())
-	os.Exit(0)
+	os.Exit(1 & len(errs))
 }
-
-
-

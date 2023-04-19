@@ -16,17 +16,14 @@ package walk
 import (
 	"fmt"
 	"os"
+	"path"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
-	"path"
 )
 
 const (
-	// the channels used for internal use and callers are all buffered.
-	// We don't want the producers to be blocked.
-	_Chansize int = 4096
 
 	// we use one worker per CPU core for the concurrent walker.
 	// ParallelismFactor multiples the number of go-routines.
@@ -35,6 +32,10 @@ const (
 	// Max number of consecutive symlinks we will follow
 	_MaxSymlinks int = 100
 )
+
+// the channels used for internal use and callers are all buffered.
+// We don't want the producers to be blocked.
+var _Chansize = _ParallelismFactor * runtime.NumCPU()
 
 type Type uint
 
@@ -50,9 +51,8 @@ const (
 	SPECIAL
 
 	// This is a short cut for "give me all entries"
-	ALL = FILE|DIR|SYMLINK|DEVICE|SPECIAL
+	ALL = FILE | DIR | SYMLINK | DEVICE | SPECIAL
 )
-
 
 // Options control the behavior of the filesystem walk
 type Options struct {
@@ -63,7 +63,7 @@ type Options struct {
 	OneFS bool
 
 	// Types of entries to return
-	Type  Type
+	Type Type
 
 	// Excludes is a list of shell-glob patterns to exclude from
 	// the walk. If a dir matches the prefix, go-walk does
@@ -73,11 +73,8 @@ type Options struct {
 	// Filter is an optional caller provided callback
 	// This function must return True if this entry should
 	// no longer be processed. ie filtered out.
-	Filter	func(nm string, fi os.FileInfo) bool
+	Filter func(nm string, fi os.FileInfo) bool
 }
-
-
-
 
 // Result is the data returned as part of the directory walk
 type Result struct {
@@ -96,7 +93,7 @@ type walkState struct {
 	errch chan error
 
 	// type mask for output filtering
-	typ   os.FileMode
+	typ os.FileMode
 
 	// Tracks completion of the DFS walk across directories.
 	// Each counter in this waitGroup tracks one subdir
@@ -105,24 +102,24 @@ type walkState struct {
 
 	singlefs func(nm string, fi os.FileInfo) bool
 
+	// the output action - either send info via chan or call user supplied func
+	apply func(nm string, fi os.FileInfo)
+
 	// Tracks device major:minor to detect mount-point crossings
-	fs sync.Map
+	fs  sync.Map
 	ino sync.Map
 }
 
 // mapping our types to the stdlib types
 var typMap = map[Type]os.FileMode{
-	FILE: 0,
-	DIR: os.ModeDir,
+	FILE:    0,
+	DIR:     os.ModeDir,
 	SYMLINK: os.ModeSymlink,
-	DEVICE:  os.ModeDevice|os.ModeCharDevice,
-	SPECIAL: os.ModeNamedPipe|os.ModeSocket,
+	DEVICE:  os.ModeDevice | os.ModeCharDevice,
+	SPECIAL: os.ModeNamedPipe | os.ModeSocket,
 }
 
-// Walk traverses the entries in 'names' in a concurrent fashion and returns
-// results in a channel of Result. The caller must service the channel. Any errors
-// encountered during the walk are returned in the error channel.
-func Walk(names []string, opt *Options) (chan Result, chan error) {
+func newWalkState(opt *Options) *walkState {
 	if opt == nil {
 		opt = &Options{}
 	}
@@ -130,21 +127,85 @@ func Walk(names []string, opt *Options) (chan Result, chan error) {
 	d := &walkState{
 		Options: *opt,
 		ch:      make(chan string, _Chansize),
-		out:     make(chan Result, _Chansize),
 		errch:   make(chan error, 8),
 		singlefs: func(string, os.FileInfo) bool {
 			return true
 		},
 	}
+	return d
+}
 
-	if opt.OneFS {
+// Walk traverses the entries in 'names' in a concurrent fashion and returns
+// results in a channel of Result. The caller must service the channel. Any errors
+// encountered during the walk are returned in the error channel.
+func Walk(names []string, opt *Options) (chan Result, chan error) {
+	out := make(chan Result, _Chansize*2)
+	d := newWalkState(opt)
+
+	// This function sends output to a chan
+	d.apply = func(nm string, fi os.FileInfo) {
+		out <- Result{nm, fi}
+	}
+
+	d.doWalk(names)
+
+	// close the channels when we're all done
+	go func() {
+		d.wg.Wait()
+		close(d.ch)
+		close(out)
+		close(d.errch)
+	}()
+
+	return out, d.errch
+}
+
+// WalkFunc traverses the entries in 'names' in a concurrent fashion and calls 'apply'
+// for entries that match criteria in 'opt'. The apply function must be concurrency-safe
+// ie it will be called concurrently from multiple go-routines. Any errors reported by
+// 'apply' will be returned from WalkFunc().
+func WalkFunc(names []string, opt *Options, apply func(nm string, fi os.FileInfo) error) []error {
+	d := newWalkState(opt)
+
+	// This calls the caller supplied 'apply' func
+	d.apply = func(nm string, fi os.FileInfo) {
+		if err := apply(nm, fi); err != nil {
+			d.errch <- err
+		}
+	}
+
+	d.doWalk(names)
+
+	// harvest errors and prepare to return
+	var errWg sync.WaitGroup
+	var errs []error
+
+	errWg.Add(1)
+	go func(in chan error) {
+		for e := range in {
+			errs = append(errs, e)
+		}
+		errWg.Done()
+	}(d.errch)
+
+	// close the channels when we're all done
+	d.wg.Wait()
+	close(d.ch)
+	close(d.errch)
+	errWg.Wait()
+
+	return errs
+}
+
+func (d *walkState) doWalk(names []string) {
+	if d.OneFS {
 		d.singlefs = d.isSingleFS
 	}
 
 	// default accept filter
 	if d.Filter == nil {
 		// by default - "don't filter anything"
-		d.Filter = func( string, os.FileInfo) bool {
+		d.Filter = func(string, os.FileInfo) bool {
 			return false
 		}
 	}
@@ -197,7 +258,7 @@ func Walk(names []string, opt *Options) (chan Result, chan error) {
 		m := fi.Mode()
 		switch {
 		case m.IsDir():
-			if opt.OneFS {
+			if d.OneFS {
 				d.trackFS(fi, nm)
 			}
 			dirs = append(dirs, nm)
@@ -215,29 +276,6 @@ func Walk(names []string, opt *Options) (chan Result, chan error) {
 	// queue the dirs
 	d.enq(dirs)
 
-	// close the channels when we're all done
-	go func() {
-		d.wg.Wait()
-		close(d.ch)
-		close(d.out)
-		close(d.errch)
-	}()
-
-	return d.out, d.errch
-}
-
-// Queue output to chan if user defined filter says accept
-func (d *walkState) output(nm string, fi os.FileInfo) {
-	m := fi.Mode()
-
-	// we have to special case regular files because there is
-	// no mask for Regular Files!
-	//
-	// For everyone else, we can consult the typ map
-
-	if (d.typ & m) > 0  || ((d.Type & FILE) > 0 && m.IsRegular()) {
-		d.out <- Result{nm, fi}
-	}
 }
 
 // worker thread to walk directories
@@ -260,6 +298,20 @@ func (d *walkState) worker() {
 		// Otherwise, we have a race condition where the workers will prematurely quit.
 		// We can only decrement this wait-group _after_ walkPath() has returned!
 		d.wg.Done()
+	}
+}
+
+// output action for entries we encounter
+func (d *walkState) output(nm string, fi os.FileInfo) {
+	m := fi.Mode()
+
+	// we have to special case regular files because there is
+	// no mask for Regular Files!
+	//
+	// For everyone else, we can consult the typ map
+
+	if (d.typ&m) > 0 || ((d.Type&FILE) > 0 && m.IsRegular()) {
+		d.apply(nm, fi)
 	}
 }
 
@@ -354,7 +406,6 @@ func (d *walkState) walkPath(nm string) {
 	d.enq(dirs)
 }
 
-
 // Walk symlinks and don't process dirs/entries that we've already seen
 // This function returns true if 'nm' ends up being a directory that we must descend.
 func (d *walkState) doSymlink(nm string, fi os.FileInfo, dirs []string) []string {
@@ -383,7 +434,6 @@ func (d *walkState) doSymlink(nm string, fi os.FileInfo, dirs []string) []string
 			newNm := path.Clean(fmt.Sprintf("%s/%s", dn, ln))
 			nm = newNm
 		}
-
 
 		fi, err := os.Lstat(nm)
 		if err != nil {
