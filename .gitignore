@@ -29,3 +29,4 @@ vendor/src/*
 vendor/pkg/*
 bin/*
 .?*.sw?
+t/t

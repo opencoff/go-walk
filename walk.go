@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -414,54 +415,25 @@ func (d *walkState) doSymlink(nm string, fi os.FileInfo, dirs []string) []string
 		return dirs
 	}
 
-	orig := nm
-	tries := 0
-
 	// process symlinks until we are done
-	for {
-		ln, err := os.Readlink(nm)
-		if err != nil {
-			d.error("readlink %s: %s", nm, err)
-			return dirs
-		}
+	newnm, err := filepath.EvalSymlinks(nm)
+	if err != nil {
+		d.error("symlink %s: %s", nm, err)
+		return dirs
+	}
+	nm = newnm
 
-		if path.IsAbs(ln) {
-			nm = ln
-		} else {
-			// update the name with link name
-			// We don't use path.Join() because it strips leading './'
-			dn := path.Dir(nm)
-			newNm := path.Clean(fmt.Sprintf("%s/%s", dn, ln))
-			nm = newNm
-		}
+	// we know this is no longer a symlink
+	fi, err = os.Stat(nm)
+	if err != nil {
+		d.error("stat %s: %s", nm, err)
+		return dirs
+	}
 
-		fi, err := os.Lstat(nm)
-		if err != nil {
-			d.error("lstat %s: %s", nm, err)
-			return dirs
-		}
-
-		m := fi.Mode()
-		if (m & os.ModeSymlink) > 0 {
-			// This is another symlink - so continue to unravel
-			tries++
-			if tries > _MaxSymlinks {
-				d.error("%s: symlink loop", orig)
-				return dirs
-			}
-
-			continue
-		}
-
-		// in all other cases, we've reached a non-symlink
-
-		// If we've seen this inode before, we are done.
-		if d.isEntrySeen(nm, fi) {
-			return dirs
-		}
-
+	// do rest of processing iff we haven't seen this entry before.
+	if !d.isEntrySeen(nm, fi) {
 		switch {
-		case m.IsDir():
+		case fi.Mode().IsDir():
 			// we only have to worry about mount points
 			if d.singlefs(nm, fi) {
 				dirs = append(dirs, nm)
@@ -469,9 +441,6 @@ func (d *walkState) doSymlink(nm string, fi os.FileInfo, dirs []string) []string
 		default:
 			d.output(nm, fi)
 		}
-
-		// And we can end the loop
-		break
 	}
 
 	return dirs
