@@ -383,6 +383,11 @@ func (d *walkState) walkPath(nm string) {
 			continue
 		}
 
+		// don't process entries we've already seen
+		if d.isEntrySeen(nm, fi) {
+			continue
+		}
+
 		if d.Filter(fp, fi) {
 			continue
 		}
