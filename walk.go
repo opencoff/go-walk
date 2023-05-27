@@ -316,10 +316,15 @@ func (d *walkState) output(nm string, fi os.FileInfo) {
 	}
 }
 
-// return true if nm needs to be excluded
+// return true iff basename(nm) matches one of the patterns
 func (d *walkState) exclude(nm string) bool {
+	if len(d.Excludes) == 0 {
+		return false
+	}
+
+	bn := path.Base(nm)
 	for _, pat := range d.Excludes {
-		ok, err := path.Match(pat, nm)
+		ok, err := path.Match(pat, bn)
 		if err != nil {
 			d.errch <- fmt.Errorf("glob '%s': %s", pat, err)
 		} else if ok {
