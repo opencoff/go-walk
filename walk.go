@@ -99,6 +99,9 @@ type walkState struct {
 	// Tracks completion of the DFS walk across directories.
 	// Each counter in this waitGroup tracks one subdir
 	// we've encountered.
+	dirWg sync.WaitGroup
+
+	// Tracks worker goroutines
 	wg sync.WaitGroup
 
 	singlefs func(nm string, fi os.FileInfo) bool
@@ -152,10 +155,11 @@ func Walk(names []string, opt *Options) (chan Result, chan error) {
 
 	// close the channels when we're all done
 	go func() {
-		d.wg.Wait()
+		d.dirWg.Wait()
 		close(d.ch)
 		close(out)
 		close(d.errch)
+		d.wg.Wait()
 	}()
 
 	return out, d.errch
@@ -190,10 +194,11 @@ func WalkFunc(names []string, opt *Options, apply func(nm string, fi os.FileInfo
 	}(d.errch)
 
 	// close the channels when we're all done
-	d.wg.Wait()
+	d.dirWg.Wait()
 	close(d.ch)
 	close(d.errch)
 	errWg.Wait()
+	d.wg.Wait()
 
 	return errs
 }
@@ -219,9 +224,8 @@ func (d *walkState) doWalk(names []string) {
 		}
 	}
 
-	// start workers; they will end when the channel is closed; we don't need
-	// any waitgroups to track these goroutines.
 	nworkers := runtime.NumCPU() * _ParallelismFactor
+	d.wg.Add(nworkers)
 	for i := 0; i < nworkers; i++ {
 		go d.worker()
 	}
@@ -285,7 +289,7 @@ func (d *walkState) worker() {
 		fi, err := os.Lstat(nm)
 		if err != nil {
 			d.error("lstat %s: %w", nm, err)
-			d.wg.Done()
+			d.dirWg.Done()
 			continue
 		}
 
@@ -298,8 +302,10 @@ func (d *walkState) worker() {
 		// It is crucial that we do this as the last thing in the processing loop.
 		// Otherwise, we have a race condition where the workers will prematurely quit.
 		// We can only decrement this wait-group _after_ walkPath() has returned!
-		d.wg.Done()
+		d.dirWg.Done()
 	}
+
+	d.wg.Done()
 }
 
 // output action for entries we encounter
@@ -334,7 +340,7 @@ func (d *walkState) exclude(nm string) bool {
 // not blocked (deadlocked)
 func (d *walkState) enq(dirs []string) {
 	if len(dirs) > 0 {
-		d.wg.Add(len(dirs))
+		d.dirWg.Add(len(dirs))
 		go func(dirs []string) {
 			for _, nm := range dirs {
 				d.ch <- nm
