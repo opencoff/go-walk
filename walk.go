@@ -41,14 +41,10 @@ var _Chansize = _ParallelismFactor * runtime.NumCPU()
 type Type uint
 
 const (
-	FILE = 1 << iota
-
+	FILE Type = 1 << iota
 	DIR
-
 	SYMLINK
-
 	DEVICE
-
 	SPECIAL
 
 	// This is a short cut for "give me all entries"
@@ -123,6 +119,14 @@ var typMap = map[Type]os.FileMode{
 	SPECIAL: os.ModeNamedPipe | os.ModeSocket,
 }
 
+var strMap = map[Type]string{
+	FILE:    "File",
+	DIR:     "Dir",
+	SYMLINK: "Symlink",
+	DEVICE:  "Device",
+	SPECIAL: "Special",
+}
+
 func newWalkState(opt *Options) *walkState {
 	if opt == nil {
 		opt = &Options{}
@@ -137,6 +141,16 @@ func newWalkState(opt *Options) *walkState {
 		},
 	}
 	return d
+}
+
+func (t Type) String() string {
+	var z []string
+	for k, v := range strMap {
+		if (k & t) > 0 {
+			z = append(z, v)
+		}
+	}
+	return strings.Join(z, "|")
 }
 
 // Walk traverses the entries in 'names' in a concurrent fashion and returns
@@ -316,7 +330,6 @@ func (d *walkState) output(nm string, fi os.FileInfo) {
 	// no mask for Regular Files!
 	//
 	// For everyone else, we can consult the typ map
-
 	if (d.typ&m) > 0 || ((d.Type&FILE) > 0 && m.IsRegular()) {
 		d.apply(nm, fi)
 	}
