@@ -59,6 +59,9 @@ type Options struct {
 	// stay within the same file-system
 	OneFS bool
 
+	// if set, return xattr for every returned result
+	Xattr bool
+
 	// Types of entries to return
 	Type Type
 
@@ -80,6 +83,10 @@ type Result struct {
 
 	// stat(2) info
 	Stat os.FileInfo
+
+	// extended attributes for this file
+	// set only if user requests it
+	Xattr Xattr
 }
 
 // internal state
@@ -127,22 +134,7 @@ var strMap = map[Type]string{
 	SPECIAL: "Special",
 }
 
-func newWalkState(opt *Options) *walkState {
-	if opt == nil {
-		opt = &Options{}
-	}
-
-	d := &walkState{
-		Options: *opt,
-		ch:      make(chan string, _Chansize),
-		errch:   make(chan error, 8),
-		singlefs: func(string, os.FileInfo) bool {
-			return true
-		},
-	}
-	return d
-}
-
+// Stringer for walk filter Type
 func (t Type) String() string {
 	var z []string
 	for k, v := range strMap {
@@ -162,7 +154,19 @@ func Walk(names []string, opt *Options) (chan Result, chan error) {
 
 	// This function sends output to a chan
 	d.apply = func(nm string, fi os.FileInfo) {
-		out <- Result{nm, fi}
+		r := Result{
+			Path: nm,
+			Stat: fi,
+		}
+		if d.Xattr {
+			x, err := getxattr(nm)
+			if err != nil {
+				d.errch <- err
+				return
+			}
+			r.Xattr = x
+		}
+		out <- r
 	}
 
 	d.doWalk(names)
@@ -183,13 +187,28 @@ func Walk(names []string, opt *Options) (chan Result, chan error) {
 // for entries that match criteria in 'opt'. The apply function must be concurrency-safe
 // ie it will be called concurrently from multiple go-routines. Any errors reported by
 // 'apply' will be returned from WalkFunc().
-func WalkFunc(names []string, opt *Options, apply func(nm string, fi os.FileInfo) error) []error {
+func WalkFunc(names []string, opt *Options, apply func(r Result) error) []error {
 	d := newWalkState(opt)
 
 	// This calls the caller supplied 'apply' func
 	d.apply = func(nm string, fi os.FileInfo) {
-		if err := apply(nm, fi); err != nil {
+		r := Result{
+			Path: nm,
+			Stat: fi,
+		}
+
+		if d.Xattr {
+			x, err := getxattr(nm)
+			if err != nil {
+				d.errch <- err
+				return
+			}
+			r.Xattr = x
+		}
+
+		if err := apply(r); err != nil {
 			d.errch <- err
+			return
 		}
 	}
 
@@ -215,6 +234,22 @@ func WalkFunc(names []string, opt *Options, apply func(nm string, fi os.FileInfo
 	d.wg.Wait()
 
 	return errs
+}
+
+func newWalkState(opt *Options) *walkState {
+	if opt == nil {
+		opt = &Options{}
+	}
+
+	d := &walkState{
+		Options: *opt,
+		ch:      make(chan string, _Chansize),
+		errch:   make(chan error, 8),
+		singlefs: func(string, os.FileInfo) bool {
+			return true
+		},
+	}
+	return d
 }
 
 func (d *walkState) doWalk(names []string) {
