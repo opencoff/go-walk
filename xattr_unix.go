@@ -11,7 +11,7 @@
 // warranty; it is provided "as is". No claim  is made to its
 // suitability for any purpose.
 
-//go:build linux
+//go:build linux || darwin
 
 package walk
 
@@ -26,7 +26,10 @@ func listxattr(p string) ([]string, error) {
 	b := make([]byte, 1024)
 
 	sz, err := unix.Llistxattr(p, b)
-	if errors.Is(err, unix.ERANGE) {
+
+	// darwin doesn't return ERANGE - so we will take an extra syscall in
+	// case the attrbuf is exactly sized
+	if errors.Is(err, unix.ERANGE) || sz == len(b) {
 		sz, err = unix.Llistxattr(p, nil)
 		if err != nil {
 			return nil, fmt.Errorf("%s: listxattr: %w", p, err)
@@ -38,6 +41,7 @@ func listxattr(p string) ([]string, error) {
 		return nil, fmt.Errorf("%s: listxattr: %w", p, err)
 	}
 
+	// the xattr are a simple, unordered list of nul terminated strings.
 	s := string(b[:sz])
 	v := strings.Split(s, "\x00")
 	return clean(v), nil

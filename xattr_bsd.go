@@ -11,7 +11,7 @@
 // warranty; it is provided "as is". No claim  is made to its
 // suitability for any purpose.
 
-//go:build freebsd && netbsd && darwin
+//go:build freebsd || netbsd
 
 package walk
 
@@ -51,8 +51,6 @@ func listxattr(p string) ([]string, error) {
 			return nil, fmt.Errorf("%p: listxattr (%s): %w", p, n.nm, err)
 		}
 
-		// darwin doesn't return ERANGE - so we will take an extra syscall in
-		// case the attrbuf is exactly sized
 		if errors.Is(err, unix.ERANGE) || sz == len(b) {
 			var zero uintptr
 

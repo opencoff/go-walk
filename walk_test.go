@@ -37,10 +37,19 @@ type test struct {
 
 var tests = []test{
 	{"$HOME/.config", FILE | SYMLINK},
+}
+
+var linuxTests = []test{
 	{"/dev", ALL},
 	{"/dev", DEVICE},
 	{"/dev", SPECIAL},
 	{"/dev", DIR | SYMLINK},
+}
+
+var macOSTests = []test{
+	{"/etc", ALL},
+	{"$HOME/Library", ALL},
+	{"$HOME/Library", FILE | SYMLINK},
 }
 
 func newWalk(tx *test) (map[string]fs.FileInfo, []error) {
@@ -132,35 +141,61 @@ func toString(v []error) string {
 }
 
 func TestWalk(t *testing.T) {
-	assert := newAsserter(t)
+
+	switch runtime.GOOS {
+	case "linux":
+		tests = append(tests, linuxTests...)
+
+	case "darwin":
+		tests = append(tests, macOSTests...)
+	}
 
 	for i := range tests {
 		tx := &tests[i]
-		r1, e1 := oldWalk(tx)
-		r2, e2 := newWalk(tx)
 
-		assert(len(e1) == 0, "%d: Errors old-walk %s:\n%s\n",
-			i, tx.dir, toString(e1))
-		assert(len(e2) == 0, "%d: Errors new-walk %s:\n%s\n",
-			i, tx.dir, toString(e2))
+		t.Run(tx.dir, func(t *testing.T) {
+			t.Parallel()
+			assert := newAsserter(t)
 
-		for k, _ := range r1 {
-			_, ok := r2[k]
-			assert(ok, "%d %s: can't find %s in new walk", i, tx.dir, k)
-			delete(r2, k)
-		}
+			var wg sync.WaitGroup
+			var r1, r2 map[string]fs.FileInfo
+			var e1, e2 []error
 
-		// now we know that everything the stdlib.Walk found is also present
-		// in our concurrent-walker.
+			wg.Add(2)
+			go func(tx *test) {
+				r2, e2 = newWalk(tx)
+				wg.Done()
+			}(tx)
 
-		if len(r2) > 0 {
-			var rem []string
+			go func(tx *test) {
+				r1, e1 = oldWalk(tx)
+				wg.Done()
+			}(tx)
 
-			for k := range r2 {
-				rem = append(rem, k)
+			wg.Wait()
+			assert(len(e2) == 0, "%d: Errors new-walk %s:\n%s\n",
+				i, tx.dir, toString(e2))
+			assert(len(e1) == 0, "%d: Errors old-walk %s:\n%s\n",
+				i, tx.dir, toString(e1))
+
+			for k, _ := range r1 {
+				_, ok := r2[k]
+				assert(ok, "%d %s: can't find %s in new walk", i, tx.dir, k)
+				delete(r2, k)
 			}
-			t.Fatalf("new walk has extra entries:\n%s\n",
-				strings.Join(rem, "\n"))
-		}
+
+			// now we know that everything the stdlib.Walk found is also present
+			// in our concurrent-walker.
+
+			if len(r2) > 0 {
+				var rem []string
+
+				for k := range r2 {
+					rem = append(rem, k)
+				}
+				t.Fatalf("new walk has extra entries:\n%s\n",
+					strings.Join(rem, "\n"))
+			}
+		})
 	}
 }
