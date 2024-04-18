@@ -1,4 +1,4 @@
-// xattr_unix.go - xattr support for unix like systems
+// xattr_unix.go - extended attribute support for unixish platforms
 //
 // (c) 2023- Sudhi Herle <sudhi@herle.net>
 //
@@ -11,7 +11,7 @@
 // warranty; it is provided "as is". No claim  is made to its
 // suitability for any purpose.
 
-//go:build linux || darwin
+//go:build !dragonfly && !solaris && !illumos && !openbsd && !windows
 
 package walk
 
@@ -19,42 +19,55 @@ import (
 	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
-	"strings"
 )
 
-func listxattr(p string) ([]string, error) {
-	b := make([]byte, 1024)
-
-	sz, err := unix.Llistxattr(p, b)
-
-	// darwin doesn't return ERANGE - so we will take an extra syscall in
-	// case the attrbuf is exactly sized
-	if errors.Is(err, unix.ERANGE) || sz == len(b) {
-		sz, err = unix.Llistxattr(p, nil)
-		if err != nil {
-			return nil, fmt.Errorf("%s: listxattr: %w", p, err)
-		}
-		b = make([]byte, sz)
-		sz, err = unix.Llistxattr(p, b)
-	}
+// get xattr for file 'p'
+func getxattr(p string) (Xattr, error) {
+	attrs, err := listxattr(p)
 	if err != nil {
-		return nil, fmt.Errorf("%s: listxattr: %w", p, err)
+		return nil, err
 	}
 
-	// the xattr are a simple, unordered list of nul terminated strings.
-	s := string(b[:sz])
-	v := strings.Split(s, "\x00")
-	return clean(v), nil
+	x := make(map[string]string)
+	b := make([]byte, 1024)
+	for _, a := range attrs {
+		sz, err := unix.Lgetxattr(p, a, b)
+		if errors.Is(err, unix.ERANGE) {
+			sz, err = unix.Lgetxattr(p, a, nil)
+			if err != nil {
+				return nil, fmt.Errorf("%s: getxattr %s: %w", p, a, err)
+			}
+			b = make([]byte, sz)
+			sz, err = unix.Lgetxattr(p, a, b)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: getxattr %s: %w", p, a, err)
+		}
+
+		x[a] = string(b[:sz])
+	}
+	return Xattr(x), nil
 }
 
-// remove empty strings in the list
-func clean(v []string) []string {
-	i := 0
-	for _, s := range v {
-		if s != "" {
-			v[i] = s
-			i++
+// Set xattrs in 'x' for file 'p'
+// This does not delete other xattrs already present
+func setxattr(p string, x Xattr) error {
+	for a, v := range x {
+		err := unix.Lsetxattr(p, a, []byte(v), 0)
+		if err != nil {
+			return fmt.Errorf("%s: setxattr %s: %w", p, a, err)
 		}
 	}
-	return v[:i]
+	return nil
+}
+
+// remove xattrs in 'x' for file 'p'
+func delxattr(p string, x Xattr) error {
+	for a := range x {
+		err := unix.Lremovexattr(p, a)
+		if err != nil {
+			return fmt.Errorf("%s: delxattr %s: %w", p, a, err)
+		}
+	}
+	return nil
 }

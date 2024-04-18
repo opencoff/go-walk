@@ -1,4 +1,4 @@
-// xattr.go - extended attribute support for go-walk
+// xattr_openbsd.go - extended attribute support for openbsd
 //
 // (c) 2023- Sudhi Herle <sudhi@herle.net>
 //
@@ -11,19 +11,22 @@
 // warranty; it is provided "as is". No claim  is made to its
 // suitability for any purpose.
 
+//go:build openbsd
+
 package walk
 
 import (
 	"fmt"
-	"strings"
 )
 
-type Xattr map[string]string
+func getxattr(p string) (Xattr, error) {
+	return Xattr{}, nil
+}
 
-func (x Xattr) String() string {
-	var s strings.Builder
-	for k, v := range x {
-		s.WriteString(fmt.Sprintf("%s=%s\n", k, v))
-	}
-	return s.String()
+func setxattr(p string, _ Xattr) error {
+	return fmt.Errorf("xattr %s: unsupported on OpenBSD", p)
+}
+
+func delxattr(p string, _ Xattr) error {
+	return nil
 }
