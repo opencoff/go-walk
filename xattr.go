@@ -27,3 +27,19 @@ func (x Xattr) String() string {
 	}
 	return s.String()
 }
+
+// NewXattr returns the extended attributes of file 'fn'
+func GetXattr(fn string) (Xattr, error) {
+	return getxattr(fn)
+}
+
+// SetXattr sets the extended attributes of file 'fn' with
+// the data in 'x'
+func SetXattr(fn string, x Xattr) error {
+	return setxattr(fn, x)
+}
+
+// DelXattr deletes the extended attributes in 'x' from file 'fn'
+func DelXattr(fn string, x Xattr) error {
+	return delxattr(fn, x)
+}
