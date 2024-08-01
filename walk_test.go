@@ -178,7 +178,7 @@ func TestWalk(t *testing.T) {
 			assert(len(e1) == 0, "%d: Errors old-walk %s:\n%s\n",
 				i, tx.dir, toString(e1))
 
-			for k, _ := range r1 {
+			for k := range r1 {
 				_, ok := r2[k]
 				assert(ok, "%d %s: can't find %s in new walk", i, tx.dir, k)
 				delete(r2, k)

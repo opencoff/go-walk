@@ -1,8 +1,9 @@
+[![GoDoc](https://godoc.org/github.com/opencoff/go-walk?status.svg)](https://godoc.org/github.com/opencoff/go-walk)
 # What is this
 
-This is a concurrent directory traversal library. It returns results
-via a channel that the caller must service. The caller can specify
-what entries are interesting:
+This is a concurrent directory traversal library. It returns each entry via
+a channel or via a caller supplied function (ie callback). In either case,
+the caller can specify what entries are interesting:
 
 * Files
 * Directories
@@ -37,7 +38,12 @@ Here is an example program:
 ```
 
 # Who's using this?
-[go-du](https://github.com/opencoff/go-du) is a simplified `du(1)`
-that uses this library. It sorts the output from largest size
-utilization to smaller ones.
+[go-progs](https://github.com/opencoff/go-progs) is a collection of go tools
+including a simpler implementation of du(1).
 
+## Licensing Terms
+The tool and code is licensed under the terms of the
+GNU Public License v2.0 (strictly v2.0). If you need a commercial
+license or a different license, please get in touch with me.
+
+See the file ``LICENSE`` for the full terms of the license.
