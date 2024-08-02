@@ -19,14 +19,15 @@ Here is an example program:
     dirs := []string{"/etc", "/usr", "/bin", "/sbin", "/lib"}
     opt := walk.Options{
             OneFS: true,
+            Type:  walk.FILE,
             FollowSymlinks: true,
     }
 
-    ch, errch := walk.Walk(dirs, walk.FILE, &opt)
+    ch, errch := walk.Walk(dirs, &opt)
 
     go func() {
         for err := range errch {
-            fmt.Printf("walk: %s\n", err)
+            fmt.Printf("walk: error: %s\n", err)
         }
     }()
 
@@ -37,9 +38,29 @@ Here is an example program:
 
 ```
 
+Here is an example using the `WalkFunc()` API:
+```go
+
+    dirs := []string{"/etc", "/usr", "/bin", "/sbin", "/lib"}
+    opt := walk.Options{
+            OneFS: true,
+            Type:  walk.FILE,
+            FollowSymlinks: true,
+    }
+
+    err := walk.WalkFunc(dirs, &opt, func(r walk.Result) error {
+            fmt.Printf("%s: %d bytes\n", r.Path, r.Stat.Size())
+    })
+
+    if err != nil {
+        fmt.Printf("errors: %s\n", err)
+    }
+
+```
+
 # Who's using this?
 [go-progs](https://github.com/opencoff/go-progs) is a collection of go tools
-including a simpler implementation of du(1).
+- many of which use this library.
 
 ## Licensing Terms
 The tool and code is licensed under the terms of the

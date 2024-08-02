@@ -3,6 +3,7 @@
 package walk
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -44,15 +45,19 @@ var linuxTests = []test{
 	{"/dev", DEVICE},
 	{"/dev", SPECIAL},
 	{"/dev", DIR | SYMLINK},
+	{"/lib", FILE | SYMLINK},
+	{"/lib", SYMLINK},
+	{"/bin", FILE},
 }
 
 var macOSTests = []test{
 	{"/etc", ALL},
+	{"/bin", FILE},
 	{"$HOME/Library", ALL},
 	{"$HOME/Library", FILE | SYMLINK},
 }
 
-func newWalk(tx *test) (map[string]fs.FileInfo, []error) {
+func newWalk(tx *test) (map[string]fs.FileInfo, error) {
 	nm := os.ExpandEnv(tx.dir)
 	names := [...]string{nm}
 	opt := &Options{
@@ -80,10 +85,13 @@ func newWalk(tx *test) (map[string]fs.FileInfo, []error) {
 	}
 
 	wg.Wait()
-	return res, errs
+	if len(errs) > 0 {
+		return res, errors.Join(errs...)
+	}
+	return res, nil
 }
 
-func oldWalk(tx *test) (map[string]fs.FileInfo, []error) {
+func oldWalk(tx *test) (map[string]fs.FileInfo, error) {
 	var m os.FileMode
 
 	ty := tx.typ
@@ -128,16 +136,10 @@ func oldWalk(tx *test) (map[string]fs.FileInfo, []error) {
 		errs = append(errs, err)
 	}
 
-	return res, errs
-}
-
-func toString(v []error) string {
-	var x []string
-
-	for _, e := range v {
-		x = append(x, fmt.Sprintf("%s", e))
+	if len(errs) > 0 {
+		return res, errors.Join(errs...)
 	}
-	return strings.Join(x, "\n")
+	return res, nil
 }
 
 func TestWalk(t *testing.T) {
@@ -159,7 +161,7 @@ func TestWalk(t *testing.T) {
 
 			var wg sync.WaitGroup
 			var r1, r2 map[string]fs.FileInfo
-			var e1, e2 []error
+			var e1, e2 error
 
 			wg.Add(2)
 			go func(tx *test) {
@@ -173,10 +175,10 @@ func TestWalk(t *testing.T) {
 			}(tx)
 
 			wg.Wait()
-			assert(len(e2) == 0, "%d: Errors new-walk %s:\n%s\n",
-				i, tx.dir, toString(e2))
-			assert(len(e1) == 0, "%d: Errors old-walk %s:\n%s\n",
-				i, tx.dir, toString(e1))
+			assert(e2 == nil, "%d: Errors new-walk %s:\n%s\n",
+				i, tx.dir, e2)
+			assert(e1 == nil, "%d: Errors old-walk %s:\n%s\n",
+				i, tx.dir, e1)
 
 			for k := range r1 {
 				_, ok := r2[k]
