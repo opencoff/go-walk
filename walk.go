@@ -11,9 +11,18 @@
 // warranty; it is provided "as is". No claim  is made to its
 // suitability for any purpose.
 
+// Package walk does a concurrent file system traversal and returns
+// each entry. Callers can filter the returned entries via `Options` or
+// a caller provided `Filter` function. This library uses all the available
+// CPUs (as returned by `runtime.NumCPU()`) to maximize concurrency of the
+// file tree traversal.
+//
+// This library can detect mount point crossings, follow symlinks and also
+// return extended attributes (xattr(7)).
 package walk
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -23,6 +32,17 @@ import (
 	"sync"
 	"syscall"
 )
+
+// High level design:
+//
+// - multiple workers; each worker is responsible for processing a single
+//   directory and its contents. A worker *always* outputs the directory entry
+//   before descending to its children.
+//
+// - each directory encountered bumps up a WaitGroup count (walkState::dirWg).
+//
+// - Some filtering is done when we output via the `.output()` method and
+//   some filtering happens when we process entries from a directory.
 
 const (
 
@@ -38,20 +58,21 @@ const (
 // We don't want the producers to be blocked.
 var _Chansize = _ParallelismFactor * runtime.NumCPU()
 
+// Type describes the type of a given file system entry.
 type Type uint
 
 const (
-	FILE Type = 1 << iota
-	DIR
-	SYMLINK
-	DEVICE
-	SPECIAL
+	FILE    Type = 1 << iota // regular file
+	DIR                      // directory
+	SYMLINK                  // symbolic link
+	DEVICE                   // device special file (blk and char)
+	SPECIAL                  // other special files
 
 	// This is a short cut for "give me all entries"
 	ALL = FILE | DIR | SYMLINK | DEVICE | SPECIAL
 )
 
-// Options control the behavior of the filesystem walk
+// Options control the behavior of the filesystem walk.
 type Options struct {
 	// Follow symlinks if set
 	FollowSymlinks bool
@@ -189,7 +210,7 @@ func Walk(names []string, opt *Options) (chan Result, chan error) {
 // for entries that match criteria in 'opt'. The apply function must be concurrency-safe
 // ie it will be called concurrently from multiple go-routines. Any errors reported by
 // 'apply' will be returned from WalkFunc().
-func WalkFunc(names []string, opt *Options, apply func(r Result) error) []error {
+func WalkFunc(names []string, opt *Options, apply func(r Result) error) error {
 	d := newWalkState(opt)
 
 	// This calls the caller supplied 'apply' func
@@ -235,7 +256,10 @@ func WalkFunc(names []string, opt *Options, apply func(r Result) error) []error 
 	errWg.Wait()
 	d.wg.Wait()
 
-	return errs
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 func newWalkState(opt *Options) *walkState {
@@ -254,6 +278,8 @@ func newWalkState(opt *Options) *walkState {
 	return d
 }
 
+// walk the entries in 'names'; this creates workers to
+// traverse the FS in a concurrent fashion.
 func (d *walkState) doWalk(names []string) {
 	if d.OneFS {
 		d.singlefs = d.isSingleFS
