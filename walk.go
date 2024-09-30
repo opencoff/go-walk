@@ -67,12 +67,14 @@ type Options struct {
 
 	// Excludes is a list of shell-glob patterns to exclude from
 	// the walk. If a dir matches the prefix, go-walk does
-	// not descend that subdirectory.
+	// not descend that subdirectory. The matching is done on the basename
+	// component of the relative pathname.
 	Excludes []string
 
 	// Filter is an optional caller provided callback
 	// This function must return True if this entry should
-	// no longer be processed. ie filtered out.
+	// no longer be processed. ie filtered out. 'nm' is the full
+	// relative path (not just the basename)
 	Filter func(nm string, fi os.FileInfo) bool
 }
 
